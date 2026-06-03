@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+# SPDX-License-Identifier: MIT
+
 set -e
 
 # Entrypoint for the mediawiki-to-gfm image.

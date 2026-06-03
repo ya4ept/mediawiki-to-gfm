@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+# SPDX-License-Identifier: MIT
+
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: install PHP dependencies with Composer ----

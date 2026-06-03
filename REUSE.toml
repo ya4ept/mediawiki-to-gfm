@@ -1,0 +1,17 @@
+version = 1
+SPDX-PackageName = "Mediawiki to GitHub Flavoured Markdown"
+SPDX-PackageSupplier = "James Riordon <jriordon@outofcontrol.ca>"
+SPDX-PackageDownloadLocation = "https://github.com/outofcontrol/mediawiki-to-gfm"
+
+[[annotations]]
+path = [
+  ".dockerignore",
+  ".github/ISSUE_TEMPLATE/bug_report.md",
+  ".github/workflows/ci.yml",
+  ".gitignore",
+  "composer.json",
+  "composer.lock",
+  "phpunit.xml",
+]
+SPDX-FileCopyrightText = "2026 Out of Control, Inc."
+SPDX-License-Identifier = "MIT"

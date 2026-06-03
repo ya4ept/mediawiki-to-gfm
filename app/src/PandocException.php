@@ -1,4 +1,7 @@
 <?php
+// SPDX-FileCopyrightText: 2023 Ryan Kadwell
+// SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+// SPDX-License-Identifier: MIT
 
 declare(strict_types=1);
 

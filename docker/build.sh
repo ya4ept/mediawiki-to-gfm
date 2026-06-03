@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 # Local single-architecture build for development and testing.

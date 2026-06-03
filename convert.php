@@ -1,5 +1,8 @@
 #!/usr/bin/env php
 <?php
+// SPDX-FileCopyrightText: Philip Ashlock
+// SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+// SPDX-License-Identifier: MIT
 
 declare(strict_types=1);
 

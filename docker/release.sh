@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 Out of Control, Inc.
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 # Build a multi-architecture image (amd64 + arm64) and push it to Docker Hub in
