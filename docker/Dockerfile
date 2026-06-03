@@ -1,99 +1,51 @@
-FROM php:8-alpine
+# syntax=docker/dockerfile:1
 
-RUN set -eux ; \
-    apk -U add --no-cache --virtual .composer-rundeps \
-    bash \
-    coreutils \
-    git \
-    make \
-    openssh-client \
-    patch \
-    subversion \
-    tini \
-    unzip \
-    zip \
-    $([ "$(apk --print-arch)" != "x86" ] && echo mercurial) \
-    $([ "$(apk --print-arch)" != "armhf" ] && echo p7zip)
+# ---- Stage 1: install PHP dependencies with Composer ----
+FROM php:8.4-alpine AS vendor
 
-RUN printf "# composer php cli ini settings\n\
-    date.timezone=UTC\n\
-    memory_limit=-1\n\
-    " > $PHP_INI_DIR/php-cli.ini
+# Composer needs git + unzip to fetch the dev-master VCS dependency.
+RUN apk add --no-cache git unzip
 
-ENV COMPOSER_ALLOW_SUPERUSER 1
-ENV COMPOSER_HOME /tmp
-ENV COMPOSER_VERSION 2.3.10
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-RUN set -eux ; \
-    # install https://github.com/mlocati/docker-php-extension-installer
-    curl \
-    --silent \
-    --fail \
-    --location \
-    --retry 3 \
-    --output /usr/local/bin/install-php-extensions \
-    --url https://github.com/mlocati/docker-php-extension-installer/releases/download/1.2.58/install-php-extensions \
-    ; \
-    echo 182011b3dca5544a70fdeb587af44ed1760aa9a2ed37d787d0f280a99f92b008e638c37762360cd85583830a097665547849cb2293c4a0ee32c2a36ef7a349e2 /usr/local/bin/install-php-extensions | sha512sum --strict --check ; \
-    chmod +x /usr/local/bin/install-php-extensions ; \
-    # install necessary/useful extensions not included in base image
-    install-php-extensions \
-    bz2 \
-    zip \
-    ; \
-    # install public keys for snapshot and tag validation, see https://composer.github.io/pubkeys.html
-    curl \
-    --silent \
-    --fail \
-    --location \
-    --retry 3 \
-    --output /tmp/keys.dev.pub \
-    --url https://raw.githubusercontent.com/composer/composer.github.io/e7f28b7200249f8e5bc912b42837d4598c74153a/snapshots.pub \
-    ; \
-    echo 572b963c4b7512a7de3c71a788772440b1996d918b1d2b5354bf8ba2bb057fadec6f7ac4852f2f8a8c01ab94c18141ce0422aec3619354b057216e0597db5ac2 /tmp/keys.dev.pub | sha512sum --strict --check ; \
-    curl \
-    --silent \
-    --fail \
-    --location \
-    --retry 3 \
-    --output /tmp/keys.tags.pub \
-    --url https://raw.githubusercontent.com/composer/composer.github.io/e7f28b7200249f8e5bc912b42837d4598c74153a/releases.pub \
-    ; \
-    echo 47f374b8840dcb0aa7b2327f13d24ab5f6ae9e58aa630af0d62b3d0ea114f4a315c5d97b21dcad3c7ffe2f0a95db2edec267adaba3f4f5a262abebe39aed3a28 /tmp/keys.tags.pub | sha512sum --strict --check ; \
-    # download installer.php, see https://getcomposer.org/download/
-    curl \
-    --silent \
-    --fail \
-    --location \
-    --retry 3 \
-    --output /tmp/installer.php \
-    --url https://raw.githubusercontent.com/composer/getcomposer.org/f24b8f860b95b52167f91bbd3e3a7bcafe043038/web/installer \
-    ; \
-    echo 3137ad86bd990524ba1dedc2038309dfa6b63790d3ca52c28afea65dcc2eaead16fb33e9a72fd2a7a8240afaf26e065939a2d472f3b0eeaa575d1e8648f9bf19 /tmp/installer.php | sha512sum --strict --check ; \
-    # install composer phar binary
-    php /tmp/installer.php \
-    --no-ansi \
-    --install-dir=/usr/bin \
-    --filename=composer \
-    --version=${COMPOSER_VERSION} \
-    ; \
-    composer --ansi --version --no-interaction ; \
-    composer diagnose ; \
-    rm -f /tmp/installer.php ; \
-    find /tmp -type d -exec chmod -v 1777 {} +
+ENV COMPOSER_ALLOW_SUPERUSER=1
+ENV COMPOSER_HOME=/tmp/composer
 
-RUN apk add --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing/ pandoc
+WORKDIR /build
 
+# Copy only what Composer needs first so this layer caches across source changes.
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --no-progress --no-scripts --prefer-dist
 
-RUN git clone https://github.com/outofcontrol/mediawiki-to-gfm.git ; \
-    cd mediawiki-to-gfm ; \
-    composer update --no-dev ; \
-    ln -s $(pwd)/convert.php /usr/bin
+# ---- Stage 2: runtime image ----
+FROM php:8.4-alpine
 
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+# tini gives us a proper init (signal handling, zombie reaping) as PID 1.
+RUN apk add --no-cache tini
 
+# Pandoc (>= 3.9, the version this tool targets). Alpine packages pandoc in the
+# edge/community repository; the stable repos do not carry it. This is the same
+# install strategy the project has always used (the older Dockerfile pulled it
+# from edge), kept on Alpine to keep the image small. Pinning to an exact pandoc
+# version is not possible via apk here, edge tracks the current release, which is
+# 3.9.x and satisfies the requirement.
+RUN apk add --no-cache pandoc-cli \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
+    && pandoc --version | head -n1
+
+# Application code lives in /opt/app; /app is reserved for the user's mounted volume.
+WORKDIR /opt/app
+COPY --from=vendor /build/vendor ./vendor
+COPY composer.json composer.lock convert.php ./
+COPY app ./app
+
+RUN ln -s /opt/app/convert.php /usr/local/bin/convert.php
+
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# The user mounts their working directory here (docker run -v "$PWD:/app").
 WORKDIR /app
 
-ENTRYPOINT ["/docker-entrypoint.sh"]
-
-CMD ["convert.php"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--help"]

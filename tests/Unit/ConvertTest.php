@@ -1,343 +1,571 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Tests\Unit;
 
+use App\Convert;
+use Pandoc\Pandoc;
+use Pandoc\PandocException;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use org\bovigo\vfs\vfsStream;
 use org\bovigo\vfs\vfsStreamDirectory;
-use App\Convert;
+use SimpleXMLElement;
 
-class ConvertTest extends TestCase
+#[CoversClass(Convert::class)]
+final class ConvertTest extends TestCase
 {
-    public function SetUp(): void
-    {
-        $options = getopt(
-            '',
-            [
-                'filename:',
-                'output::',
-                'format::',
-                'addmeta::',
-                'flatten::',
-                'indexes::',
-                'version::',
-                'help::'
-            ]
-        );
+    private vfsStreamDirectory $fileSystem;
 
-        $xml = $this->loadData();
-        $directory = [
+    /** Project root, captured so tearDown can prove no real files were created. */
+    private static string $projectRoot;
+
+    public static function setUpBeforeClass(): void
+    {
+        self::$projectRoot = dirname(__DIR__, 2);
+    }
+
+    protected function setUp(): void
+    {
+        $this->fileSystem = vfsStream::setup('root', null, [
             'data' => [
-                'valid.xml' => $xml,
-                'invalid.xml' => ''
+                'valid.xml' => $this->sampleXml(),
+                'invalid.xml' => '<not><valid></xml>',
+                'empty.xml' => '<mediawiki></mediawiki>',
             ],
-            'output' => []
-        ];
-        // setup and cache the virtual file system
-        $this->file_system = vfsStream::setup('root', 444, $directory);
-
-        $this->convert = new Convert([$options]);
+            'output' => [],
+        ]);
     }
 
     /**
-     * @test
+     * Safety net: every test must operate entirely inside the vfsStream sandbox.
+     * If a test ever writes to the real project tree, fail loudly here rather than
+     * silently leaving (or deleting) files on disk.
      */
-    public function set_and_get_options_functions(): void
+    protected function tearDown(): void
     {
-        $name = 'add_meta';
-        $value = [$name => 'set to true'];
-        $this->convert->setOption($name, $value);
-        $this->assertEquals($this->convert->getOption($name), $value['add_meta']);
-    }
-
-    public function test_set_option_true(): void
-    {
-        $this->convert->setOption('flatten', ['flatten' => true]);
-        $this->assertEquals(true, $this->convert->getOption('flatten'));
-    }
-
-    public function test_leave_boolean_option_as_default()
-    {
-        $this->assertEquals(false, $this->convert->getOption('addmeta'));
+        $strays = glob(self::$projectRoot . '/output/*');
+        $this->assertSame(
+            [],
+            $strays ?: [],
+            'A test wrote to the real project output/ directory: ' . implode(', ', $strays ?: []),
+        );
     }
 
     /**
-     * @test
+     * Build a Convert instance whose Pandoc dependency is mocked so no binary is invoked.
+     *
+     * @param array<string, mixed> $options
      */
-    public function all_arguments_properly_set()
+    private function makeConvert(array $options = [], ?Pandoc $pandoc = null): Convert
     {
-        $options = [
+        // Force every output path into the vfsStream sandbox. A bare relative
+        // path (e.g. 'output') would otherwise resolve against the real CWD.
+        if (!isset($options['output']) || !str_starts_with((string) $options['output'], 'vfs://')) {
+            $options['output'] = $this->fileSystem->url() . '/output';
+        }
+
+        return new Convert($options, $pandoc ?? $this->makePandoc());
+    }
+
+    /**
+     * A Pandoc test double that echoes its input back, standing in for a real conversion.
+     *
+     * We use a hand-written fake rather than a PHPUnit mock on purpose: the real
+     * Pandoc::__destruct() runs glob($tmpFile.'*') and unlinks the matches, and a
+     * mock created without the constructor leaves $tmpFile empty, so glob('*') would
+     * match (and delete) every file in the current working directory when the mock is
+     * garbage-collected. FakePandoc has an empty destructor and never touches disk.
+     */
+    private function makePandoc(): Pandoc
+    {
+        return new FakePandoc();
+    }
+
+    private function makeThrowingPandoc(string $message = 'boom'): Pandoc
+    {
+        return new FakePandoc(throwMessage: $message);
+    }
+
+    private function urlFor(string $file): string
+    {
+        return $this->fileSystem->url() . '/data/' . $file;
+    }
+
+    /** The sandboxed output directory, with the trailing slash Convert appends. */
+    private function outputUrl(): string
+    {
+        return $this->fileSystem->url() . '/output/';
+    }
+
+    // --- Option parsing -----------------------------------------------------
+
+    #[Test]
+    public function it_sets_and_reads_a_string_option(): void
+    {
+        $convert = $this->makeConvert();
+        $convert->setOption('format', ['format' => 'rst']);
+
+        $this->assertSame('rst', $convert->getOption('format'));
+    }
+
+    #[Test]
+    public function a_bare_flag_with_no_value_is_treated_as_true(): void
+    {
+        $convert = $this->makeConvert();
+        // getopt represents a value-less flag as an empty string.
+        $convert->setOption('flatten', ['flatten' => '']);
+
+        $this->assertTrue($convert->getOption('flatten'));
+    }
+
+    #[Test]
+    public function an_absent_boolean_option_falls_back_to_its_default(): void
+    {
+        $convert = $this->makeConvert();
+        $convert->setOption('addmeta', []);
+
+        $this->assertFalse($convert->getOption('addmeta'));
+    }
+
+    #[Test]
+    public function constructor_maps_all_arguments_onto_properties(): void
+    {
+        $convert = new Convert([
             'filename' => '/my/file/name.xml',
             'output' => 'newoutputfolder',
             'format' => 'testformat',
-            'addmeta' => true,
-            'flatten' => true,
-            'indexes' => true,
-        ];
+            'addmeta' => '',
+            'flatten' => '',
+            'indexes' => '',
+            'skiperrors' => '',
+        ], $this->makePandoc());
 
-        $this->convert->setArguments($options);
-
-        // Assert that each argument is actually set correct
-        $this->assertEquals($this->convert->getOption('filename'), $options['filename']);
+        $this->assertSame('/my/file/name.xml', $convert->getOption('filename'));
+        $this->assertSame('newoutputfolder/', $convert->getOption('output'));
+        $this->assertSame('testformat', $convert->getOption('format'));
+        $this->assertTrue($convert->getOption('addmeta'));
+        $this->assertTrue($convert->getOption('flatten'));
+        $this->assertTrue($convert->getOption('indexes'));
+        $this->assertTrue($convert->getOption('skiperrors'));
     }
 
-    /**
-     * @test
-     */
-    public function file_meta_data_gets_properly_built()
+    #[Test]
+    public function output_default_is_normalized_with_a_trailing_slash(): void
     {
-        $options = [
-            'title' => 'My file title',
-            'url' => '/my/url'
-        ];
+        $convert = new Convert([], $this->makePandoc());
 
-        // Test with add_meta disabled
-        $this->convert->setOption('addmeta', ['addmeta' => null]);
-        $metadata = $this->convert->getMetaData($options);
-        $this->assertEquals('', $metadata);
-
-        // Test with add_meta enabled
-        $this->convert->setOption('addmeta', ['addmeta' => true]);
-        $metadata = $this->convert->getMetaData($options);
-        $this->assertEquals($metadata, "---\ntitle: My file title\npermalink: //my/url/\n---\n\n");
+        $this->assertSame('output/', $convert->getOption('output'));
     }
 
-    public function test_cleantext_normalizes_path()
+    // --- File metadata ------------------------------------------------------
+
+    #[Test]
+    public function it_builds_meta_for_a_single_level_page(): void
     {
-        $data = $this->helper_loadXMLData();
-        $fileMeta = $this->convert->retrieveFileInfo($data[1]->xpath('title'));
-        $cleanText = $this->convert->cleanText('[[../../minutes|can be found here]]', $fileMeta);
-        $this->assertEquals('[[minutes|can be found here]]', $cleanText);
+        $convert = $this->makeConvert();
+        $node = $this->firstPage();
+
+        $this->assertSame([
+            'directory' => $this->outputUrl(),
+            'filename' => 'Pageone',
+            'title' => 'Pageone',
+            'url' => 'Pageone',
+        ], $convert->retrieveFileInfo($node->xpath('title')));
     }
 
-    public function test_cleantext_fixed_relative_path()
+    #[Test]
+    public function it_builds_meta_for_a_nested_page(): void
     {
-        $data = $this->helper_loadXMLData();
-        $fileMeta = $this->convert->retrieveFileInfo($data[1]->xpath('title'));
-        $cleanText = $this->convert->cleanText('[[/minutes|can be found here]]', $fileMeta);
-        $this->assertEquals('[[Folderone/Pagetwo/minutes|can be found here]]', $cleanText);
-    }
+        $convert = $this->makeConvert();
+        $node = $this->secondPage();
 
-    public function test_fixes_commonly_broken_external_links()
-    {
-        $data = $this->helper_loadXMLData();
-        $fileMeta = $this->convert->retrieveFileInfo($data[1]->xpath('title'));
-        $cleanText = $this->convert->cleanText('[[https://minutes can be found here]]', $fileMeta);
-        $this->assertEquals('[https://minutes can be found here]', $cleanText);
-    }
-    /**
-     * @test
-     */
-    public function retrieveFileInfo_builds_single_name_variables_properly()
-    {
-        $data = $this->helper_loadXMLData();
-        $fileMeta = $this->convert->retrieveFileInfo($data[0]->xpath('title'));
-        $validData = [
-            "directory" => "output/",
-            "filename" => "Pageone",
-            "title" => "Pageone",
-            "url" => "Pageone"
-        ];
-        $this->assertEquals($fileMeta, $validData);
-    }
-
-    /**
-     * @test
-     */
-    public function retrieveFileInfo_builds_multi_name_variables_properly()
-    {
-        $data = $this->helper_loadXMLData();
-        $fileMeta = $this->convert->retrieveFileInfo($data[1]->xpath('title'));
-        $validData = [
-            'directory' => 'output/Folderone/',
+        $this->assertSame([
+            'directory' => $this->outputUrl() . 'Folderone/',
             'filename' => 'Pagetwo',
             'title' => 'Folderone Pagetwo',
-            'url' => 'Folderone/Pagetwo'
+            'url' => 'Folderone/Pagetwo',
+        ], $convert->retrieveFileInfo($node->xpath('title')));
+    }
+
+    #[Test]
+    public function flatten_collapses_a_nested_page_into_a_single_filename(): void
+    {
+        $convert = $this->makeConvert(['flatten' => '']);
+        $node = $this->secondPage();
+        $meta = $convert->retrieveFileInfo($node->xpath('title'));
+
+        $this->assertSame($this->outputUrl(), $meta['directory']);
+        $this->assertSame('Folderone_Pagetwo', $meta['filename']);
+    }
+
+    #[Test]
+    #[DataProvider('metaDataProvider')]
+    public function it_builds_permalink_front_matter_only_when_addmeta_is_set(
+        bool $addmeta,
+        string $expected,
+    ): void {
+        $convert = $this->makeConvert();
+        $convert->setOption('addmeta', ['addmeta' => $addmeta ? '' : null]);
+
+        $meta = ['title' => 'My file title', 'url' => 'my/url'];
+
+        $this->assertSame($expected, $convert->getMetaData($meta));
+    }
+
+    /** @return array<string, array{bool, string}> */
+    public static function metaDataProvider(): array
+    {
+        return [
+            'disabled yields empty string' => [false, ''],
+            'enabled yields front matter' => [
+                true,
+                "---\ntitle: My file title\npermalink: /my/url/\n---\n\n",
+            ],
         ];
-        $this->assertEquals($fileMeta, $validData);
     }
 
-    /**
-     * @test
-     */
-    public function valid_xml_when_loading_valid_xml_file()
+    // --- De-duplication -----------------------------------------------------
+
+    #[Test]
+    public function repeated_filenames_get_an_incrementing_suffix(): void
     {
-        $data = $this->helper_loadXMLData();
-        $this->assertEquals($data[0]->title, 'Pageone');
-        $this->assertEquals($data[1]->title, 'Folderone/Pagetwo');
-        $this->assertEquals(count($data), 2);
+        $convert = $this->makeConvert();
+
+        $this->assertSame('Page', $convert->pageDeDuplicator('Page'));
+        $this->assertSame('Page(1)', $convert->pageDeDuplicator('Page'));
+        $this->assertSame('Page(2)', $convert->pageDeDuplicator('Page'));
     }
 
-    /**
-     * @expectedException Exception
-     */
-    public function test_exception_thrown_when_loading_invalid_xml_file()
+    #[Test]
+    public function de_duplication_is_case_insensitive(): void
     {
-        $this->expectException(\Exception::class);
-        $this->convert->setOption('filename', ['filename' => $this->file_system->url() . '/data/invalid.xml']);
-        $this->convert->loadData($this->convert->loadFile());
+        $convert = $this->makeConvert();
+
+        $this->assertSame('Page', $convert->pageDeDuplicator('Page'));
+        $this->assertSame('page(1)', $convert->pageDeDuplicator('page'));
     }
 
-    /**
-     * @expectedException Exception
-     */
-    public function test_exception_thrown_when_loading_data_from_none_existant_file()
-    {
-        $this->expectException(\Exception::class);
-        $this->convert->setOption('filename', ['filename' => $this->file_system->url() . '/data/nonexistentfile.xml']);
-        $this->convert->loadFile();
+    // --- Link cleaning (cleanText) -----------------------------------------
+
+    #[Test]
+    #[DataProvider('cleanTextProvider')]
+    public function clean_text_rewrites_links_relative_to_the_current_page(
+        string $input,
+        string $expected,
+    ): void {
+        $convert = $this->makeConvert();
+        $meta = $convert->retrieveFileInfo($this->secondPage()->xpath('title'));
+
+        $this->assertSame($expected, $convert->cleanText($input, $meta));
     }
 
-    /**
-     * @test
-     */
-    public function test_file_exists()
+    /** @return array<string, array{string, string}> */
+    public static function cleanTextProvider(): array
     {
-        $file = $this->file_system->url() . '/data/valid.xml';
-        $this->convert->setOption('filename', ['filename' => $file]);
-        $this->assertFileExists($file);
+        return [
+            'normalizes a ../../ path' => [
+                '[[../../minutes|can be found here]]',
+                '[[minutes|can be found here]]',
+            ],
+            'resolves a /-rooted relative path against the page url' => [
+                '[[/minutes|can be found here]]',
+                '[[Folderone/Pagetwo/minutes|can be found here]]',
+            ],
+            'passes a malformed external link through as a plain link' => [
+                '[[https://minutes can be found here]]',
+                '[https://minutes can be found here]',
+            ],
+        ];
     }
 
-    /**
-     * @expectedException Exception
-     */
-    public function test_exception_thrown_when_create_directory_fails()
+    #[Test]
+    public function clean_text_decodes_html_entities(): void
     {
-        // Missing newFolder slash, creates an error
-        $this->expectException(\Exception::class);
-        $newFolder = $this->file_system->url() . 'nonexistentoutput';
-        $this->convert->setOption('filename', ['filename' => $newFolder]);
-        $this->convert->createDirectory($newFolder);
+        $convert = $this->makeConvert();
+        $meta = ['url' => 'Page'];
+
+        $this->assertSame('a & b < c', $convert->cleanText('a &amp; b &lt; c', $meta));
     }
 
-    /**
-     * @test
-     */
-    public function test_no_errors_when_create_directory_valid()
+    // --- Pandoc interaction -------------------------------------------------
+
+    #[Test]
+    public function run_pandoc_unescapes_backslashed_underscores(): void
     {
-        $newFolder = $this->file_system->url() . '/output_to_create';
-        $this->convert->createDirectory($newFolder);
-        $this->assertFileExists($newFolder);
+        $pandoc = new FakePandoc(returnValue: 'some \_text\_');
+
+        $convert = $this->makeConvert([], $pandoc);
+        $convert->pandocSetup();
+
+        $this->assertSame('some _text_', $convert->runPandoc('some _text_'));
+        $this->assertSame('some _text_', $pandoc->lastContent);
+        $this->assertSame(['from' => 'mediawiki', 'to' => 'gfm'], $pandoc->lastOptions);
     }
 
-    /**
-     * @test
-     */
-    public function get_current_version()
+    #[Test]
+    public function pandoc_setup_forwards_the_chosen_format(): void
     {
-        $this->expectOutputRegex('/Version.*/');
-        $this->convert->getVersion();
-    }
-    /**
-     * @test
-     */
-    public function help_is_loadable()
-    {
-        $this->expectOutputRegex('/.*MIT License.*/');
-        $this->convert->help();
+        $pandoc = new FakePandoc();
+
+        $convert = $this->makeConvert(['format' => 'rst'], $pandoc);
+        $convert->pandocSetup();
+        $convert->runPandoc('x');
+
+        $this->assertSame(['from' => 'mediawiki', 'to' => 'rst'], $pandoc->lastOptions);
     }
 
-    private function helper_loadXMLData()
+    // --- Full conversion pipeline ------------------------------------------
+
+    #[Test]
+    public function convert_data_writes_a_markdown_file_per_page(): void
     {
-        $this->convert->setOption('filename', ['filename' => $this->file_system->url() . '/data/valid.xml']);
-        $this->convert->loadData($this->convert->loadFile());
-        return $this->convert->getOption('dataToConvert');
+        $convert = $this->makeConvert(['filename' => $this->urlFor('valid.xml')]);
+        $convert->pandocSetup();
+        $convert->loadData($convert->loadFile());
+        $convert->convertData();
+
+        $output = $this->fileSystem->getChild('output');
+        $this->assertTrue($output->hasChild('Pageone.md'));
+        $this->assertTrue($output->hasChild('Folderone'));
+        $this->assertTrue($output->getChild('Folderone')->hasChild('Pagetwo.md'));
     }
 
-    private function loadData()
+    #[Test]
+    public function convert_data_aborts_on_a_pandoc_error_by_default(): void
+    {
+        $pandoc = $this->makeThrowingPandoc();
+
+        $convert = $this->makeConvert(['filename' => $this->urlFor('valid.xml')], $pandoc);
+        $convert->pandocSetup();
+        $convert->loadData($convert->loadFile());
+
+        $this->expectException(\RuntimeException::class);
+        $convert->convertData();
+    }
+
+    #[Test]
+    public function convert_data_skips_failing_pages_when_skiperrors_is_set(): void
+    {
+        $pandoc = $this->makeThrowingPandoc();
+
+        $convert = $this->makeConvert([
+            'filename' => $this->urlFor('valid.xml'),
+            'skiperrors' => '',
+        ], $pandoc);
+        $convert->pandocSetup();
+        $convert->loadData($convert->loadFile());
+
+        $this->expectOutputRegex('/Failed converting/');
+        $convert->convertData();
+
+        // Nothing should have been written.
+        $this->assertCount(0, $this->fileSystem->getChild('output')->getChildren());
+    }
+
+    #[Test]
+    public function index_pages_are_renamed_when_indexes_is_set(): void
+    {
+        $xml = <<<XML
+        <mediawiki ns="http://www.mediawiki.org/xml/export-0.10/" version="0.10">
+          <page><title>Folderone</title><revision><text>landing</text></revision></page>
+          <page><title>Folderone/Child</title><revision><text>child</text></revision></page>
+        </mediawiki>
+        XML;
+        vfsStream::newFile('data/indexes.xml')->at($this->fileSystem)->setContent($xml);
+
+        $convert = $this->makeConvert([
+            'filename' => $this->urlFor('indexes.xml'),
+            'indexes' => '',
+        ]);
+        $convert->pandocSetup();
+        $convert->loadData($convert->loadFile());
+        $convert->convertData();
+        $convert->renameFiles();
+
+        $folder = $this->fileSystem->getChild('output')->getChild('Folderone');
+        $this->assertTrue($folder->hasChild('index.md'));
+        $this->assertTrue($folder->hasChild('Child.md'));
+        $this->assertFalse($this->fileSystem->getChild('output')->hasChild('Folderone.md'));
+    }
+
+    // --- XML loading --------------------------------------------------------
+
+    #[Test]
+    public function it_loads_page_nodes_from_a_valid_export(): void
+    {
+        $convert = $this->makeConvert(['filename' => $this->urlFor('valid.xml')]);
+        $convert->loadData($convert->loadFile());
+
+        $pages = $convert->getOption('dataToConvert');
+        $this->assertCount(2, $pages);
+        $this->assertSame('Pageone', (string) $pages[0]->title);
+        $this->assertSame('Folderone/Pagetwo', (string) $pages[1]->title);
+    }
+
+    #[Test]
+    public function load_file_strips_the_xml_namespace_declaration(): void
+    {
+        $convert = $this->makeConvert(['filename' => $this->urlFor('valid.xml')]);
+
+        $this->assertStringNotContainsString('xmlns=', $convert->loadFile());
+    }
+
+    #[Test]
+    public function loading_invalid_xml_throws(): void
+    {
+        $convert = $this->makeConvert(['filename' => $this->urlFor('invalid.xml')]);
+
+        $this->expectException(\RuntimeException::class);
+        $convert->loadData($convert->loadFile());
+    }
+
+    #[Test]
+    public function loading_an_export_without_pages_throws(): void
+    {
+        $convert = $this->makeConvert(['filename' => $this->urlFor('empty.xml')]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('XML Data is empty');
+        $convert->loadData($convert->loadFile());
+    }
+
+    #[Test]
+    public function loading_a_missing_file_throws(): void
+    {
+        $convert = $this->makeConvert(['filename' => $this->urlFor('nope.xml')]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Input file does not exist');
+        $convert->loadFile();
+    }
+
+    // --- Directory creation -------------------------------------------------
+
+    #[Test]
+    public function it_creates_a_missing_output_directory(): void
+    {
+        $convert = $this->makeConvert();
+        $dir = $this->fileSystem->url() . '/freshdir';
+
+        $convert->createDirectory($dir);
+
+        $this->assertDirectoryExists($dir);
+    }
+
+    #[Test]
+    public function creating_a_directory_is_idempotent(): void
+    {
+        $convert = $this->makeConvert();
+        $existing = $this->fileSystem->url() . '/output';
+
+        // Should not throw when the directory already exists.
+        $this->assertSame($existing, $convert->createDirectory($existing));
+    }
+
+    // --- CLI output ---------------------------------------------------------
+
+    #[Test]
+    public function get_version_prints_a_version_string(): void
+    {
+        $this->expectOutputRegex('/Version:/');
+        $this->makeConvert()->getVersion();
+    }
+
+    #[Test]
+    public function help_prints_usage_including_the_license(): void
+    {
+        $this->expectOutputRegex('/MIT License/');
+        $this->makeConvert()->help();
+    }
+
+    // --- Fixtures -----------------------------------------------------------
+
+    private function firstPage(): SimpleXMLElement
+    {
+        return $this->pages()[0];
+    }
+
+    private function secondPage(): SimpleXMLElement
+    {
+        return $this->pages()[1];
+    }
+
+    /** @return array<int, SimpleXMLElement> */
+    private function pages(): array
+    {
+        $xml = new SimpleXMLElement(str_replace('xmlns=', 'ns=', $this->sampleXml()));
+
+        return $xml->xpath('page');
+    }
+
+    private function sampleXml(): string
     {
         return <<<XMLFILE
-<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.10/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mediawiki.org/xml/export-0.10/ http://www.mediawiki.org/xml/export-0.10.xsd" version="0.10" xml:lang="en">
-  <siteinfo>
-    <sitename>CompanyWiki</sitename>
-    <dbname>company_wiki</dbname>
-    <base>https://domain.com/path/to/wiki/Main_Page</base>
-    <generator>MediaWiki 1.29.1</generator>
-    <case>first-letter</case>
-    <namespaces>
-      <namespace key="-2" case="first-letter">Media</namespace>
-    </namespaces>
-  </siteinfo>
-  <page>
-    <title>Pageone</title>
-    <ns>0</ns>
-    <id>3145</id>
-    <revision>
-      <id>40821</id>
-      <parentid>40578</parentid>
-      <timestamp>2016-11-10T21:37:26Z</timestamp>
-      <contributor>
-        <username>Kbr google</username>
-        <id>758</id>
-      </contributor>
-      <comment>/* Technical Documents */</comment>
-      <model>wikitext</model>
-      <format>text/x-wiki</format>
-      <text xml:space="preserve" bytes="23787">__TOC__
+        <mediawiki xmlns="http://www.mediawiki.org/xml/export-0.10/" version="0.10" xml:lang="en">
+          <page>
+            <title>Pageone</title>
+            <revision>
+              <text xml:space="preserve">This is a page with [[Folderone/Documentone|a link]].</text>
+            </revision>
+          </page>
+          <page>
+            <title>Folderone/Pagetwo</title>
+            <revision>
+              <text xml:space="preserve">=== Attendance ===
 
-This is a page
+        [http://domain.com/recording/file.mp3 Audio Recording]</text>
+            </revision>
+          </page>
+        </mediawiki>
+        XMLFILE;
+    }
+}
 
-== Documents ==
+/**
+ * Hand-written Pandoc test double.
+ *
+ * It deliberately does NOT call the real Pandoc constructor (which requires a
+ * pandoc binary and a writable tmp dir) and overrides __destruct() to do nothing.
+ * The real Pandoc::__destruct() runs glob($tmpFile . '*') and unlinks the results;
+ * with an unset $tmpFile that becomes glob('*') against the current working
+ * directory, deleting real project files. This fake never touches the filesystem.
+ */
+final class FakePandoc extends Pandoc
+{
+    public ?string $lastContent = null;
 
-* [[Folderone/Documentone|A document that needs a link]]
-* [[Foldertwo/Documenttwo|A document that also needs a link]]
+    /** @var array<string, string>|null */
+    public ?array $lastOptions = null;
 
-* First line of list
-** First line of indented list
-* Second line of list
-** Second line of indented list
+    public function __construct(
+        private string $returnValue = '',
+        private ?string $throwMessage = null,
+    ) {
+        // Intentionally do not call parent::__construct().
+    }
 
-== A heading ==
+    /**
+     * @param array<string, string> $options
+     */
+    public function runWith($content, $options): string
+    {
+        $this->lastContent = $content;
+        $this->lastOptions = $options;
 
-Follow this link to [http://example.com/path/to/destination/ see where it goes].
+        if ($this->throwMessage !== null) {
+            throw new PandocException($this->throwMessage);
+        }
 
-== Bad Links to fix ==
+        // Default behaviour echoes the input back, mimicking a pass-through conversion.
+        return $this->returnValue !== '' ? $this->returnValue : $content;
+    }
 
-* [[https://example.com/this/is/external/ Improperly formatted link]]
-* Link that breaks older pandoc: [https://example.com/script.php?search=findme&amp;parttwo=&amp;three=.&amp;four=answer this link should be fixed now]
-        </text>
-      <sha1>hymbf8qh3k49td4dg7qdfsox1er4xpw</sha1>
-    </revision>
-  </page>
-  <page>
-    <title>Folderone/Pagetwo</title>
-    <ns>0</ns>
-    <id>3406</id>
-    <revision>
-      <id>29360</id>
-      <parentid>29283</parentid>
-      <timestamp>2010-08-04T21:11:57Z</timestamp>
-      <contributor>
-        <username>Cmarrin</username>
-        <id>744</id>
-      </contributor>
-      <minor/>
-      <comment>[[Directory/SubDirectory]] moved to [[Directory/OtherDirectory]]: New Name</comment>
-      <model>wikitext</model>
-      <format>text/x-wiki</format>
-      <text xml:space="preserve" bytes="2536">=== Attendance ===
-
-* name - company
-* name2 - company2
-* name3 - company3
-
-=== Agenda ===
-
-
-name: name2 are you here now?
-  - no sure if I am here or there.
-
-- next meeting is in two years
-  - I think I can have the updates completed by then
-
-=== Audio ===
-
-[http://domain.com/recording/file.mp3 Audio Recording]
-      </text>
-      <sha1>0blsvabcwdureue00oaytv56hr84j4r</sha1>
-    </revision>
-  </page>
-</mediawiki>
-XMLFILE;
+    public function __destruct()
+    {
+        // No-op: never glob/unlink anything.
     }
 }

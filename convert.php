@@ -1,6 +1,8 @@
 #!/usr/bin/env php
 <?php
 
+declare(strict_types=1);
+
 /**
  * Convert converts Mediawiki format to GitHub Flavoured Markdown format
  *
@@ -13,8 +15,8 @@
  * @license MIT License https://opensource.org/licenses/MIT
  */
 
-if (is_file(__DIR__.'/vendor/autoload.php') === true) {
-    require_once 'vendor/autoload.php';
+if (is_file(__DIR__ . '/vendor/autoload.php') === true) {
+    require_once __DIR__ . '/vendor/autoload.php';
 } else {
     exit("Please run 'composer update --no-dev' first." . PHP_EOL);
 }
@@ -48,7 +50,7 @@ if (isset($args['version'])) {
 
 try {
     $convert->run();
-} catch (Exception $e) {
+} catch (Throwable $e) {
     echo $e->getMessage() . PHP_EOL;
     exit(1);
 }

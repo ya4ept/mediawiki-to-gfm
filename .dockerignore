@@ -1,0 +1,10 @@
+.git
+.github
+vendor
+output
+tests
+.phpunit.cache
+.phpunit.result.cache
+*.md
+docker/build.sh
+docker/release.sh

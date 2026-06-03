@@ -1,149 +1,126 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App;
 
 use Pandoc\Pandoc;
 use Pandoc\PandocException;
-use App\CleanLink;
-use App\PandocFix;
+use SimpleXMLElement;
 
 class Convert
 {
+    /**
+     * Converter version.
+     */
+    private string $version = '1.0.0';
 
     /**
-     * Converter Version
-     * @var string
+     * Path and name of the file to convert.
      */
-    private $version = '0.9.3';
-    /**
-     * Path and name of  file to convert
-     * @var String
-     */
-    private $filename;
+    private ?string $filename = null;
 
     /**
-     * Path to directory to save converted files
-     * @var String
+     * Path to the directory where converted files are saved.
      */
-    private $output;
+    private string $output = 'output';
 
     /**
-     * Set to true will save converted files in one directory level
-     * @var boolean
+     * When true, converted files are saved in a single directory level.
      */
-    private $flatten = false;
+    private bool $flatten = false;
 
     /**
-     * Set to true will add a permalink in 'gfm' format to each converted file
-     * @var boolean
+     * When true, a permalink front-matter block is added to each converted file.
      */
-    private $addmeta = false;
+    private bool $addmeta = false;
 
     /**
-     * Set to true will force the file matching the name of each directory to index.md
-     * @var boolean
+     * When true, a file matching the name of its directory is renamed to index.md.
      */
-    private $indexes = false;
+    private bool $indexes = false;
 
     /**
-     * Set to true will skip files failing conversion
-     * @var boolean
+     * When true, files that fail conversion are skipped rather than aborting the run.
      */
-    private $skiperrors = false;
+    private bool $skiperrors = false;
 
     /**
-     * Which format to convert files to.
-     * @var string
+     * Target format passed to Pandoc.
      */
-    private $format = 'gfm';
+    private string $format = 'gfm';
 
     /**
-     * Holds the count of how many files converted
-     * @var integer
+     * Count of files converted so far.
      */
-    private $counter = 0;
+    private int $counter = 0;
 
     /**
-     * Holds list of files converted when 'indexes' is set to true
-     * @var [type]
-     */
-    private $directory_list;
-
-    /**
-     * Holds XML Data for each 'page' found in the XML file
-     * @var [type]
-     */
-    private $dataToConvert;
-
-    /**
-     * Holds instance of Pandoc
-     * @var Object
-     */
-    private $pandoc;
-
-    /**
-     * Options for Pandoc object
-     * @var Array
-     */
-    private $pandocOptions;
-
-    /**
-     * Set whether the version of pandoc in use contains a known link bug
-     * @see // Link to bug on GitHub
-     * @var [type]
-     */
-    private $pandocBroken;
-
-    /**
-     * Holds list of pages
+     * Directories seen while converting, used by renameFiles() when --indexes is set.
      *
-     * @var string
+     * @var list<string>
      */
-    private $pageList;
+    private array $directory_list = [];
 
     /**
-     * Construct
+     * Page nodes extracted from the XML export.
+     *
+     * @var array<int, SimpleXMLElement>
      */
-    public function __construct($options)
+    private array $dataToConvert = [];
+
+    /**
+     * Options forwarded to Pandoc on each conversion.
+     *
+     * @var array<string, string>
+     */
+    private array $pandocOptions = [];
+
+    /**
+     * Space-delimited lower-cased list of filenames already written, used to de-duplicate.
+     */
+    private string $pageList = '';
+
+    /**
+     * @param array<string, mixed> $options Parsed CLI options (from getopt).
+     * @param Pandoc|null $pandoc Injected Pandoc instance; a real one is created when null.
+     */
+    public function __construct(array $options, private ?Pandoc $pandoc = null)
     {
         $this->setArguments($options);
     }
 
-    public function run()
+    public function run(): void
     {
         $this->createDirectory($this->output);
         $this->pandocSetup();
         $this->loadData($this->loadFile());
         $this->convertData();
-        $this->renameFiles($this->directory_list);
-        $this->message("$this->counter files converted");
+        $this->renameFiles();
+        $this->message("{$this->counter} files converted");
     }
 
     /**
-     * Get instance and setup pandoc
-     * @return
+     * Create the Pandoc instance (if not injected) and build the conversion options.
      */
-    public function pandocSetup()
+    public function pandocSetup(): void
     {
-        $this->pandoc = new Pandoc();
-        $this->pandocBroken = (version_compare($this->pandoc->getVersion(), '2.0.2', '<='));
+        $this->pandoc ??= new Pandoc();
         $this->pandocOptions = [
-            "from"  => "mediawiki",
-            "to"    => $this->format
+            'from' => 'mediawiki',
+            'to' => $this->format,
         ];
     }
 
     /**
-     * Method to oversee the cleaning, preparation and converting of one page
-     * 
-     * @return void
+     * Clean, convert and write every page found in the XML export.
      */
-    public function convertData()
+    public function convertData(): void
     {
         foreach ($this->dataToConvert as $node) {
             $fileMeta = $this->retrieveFileInfo($node->xpath('title'));
             $text = $node->xpath('revision/text');
-            $text = $this->cleanText($text[0], $fileMeta);
+            $text = $this->cleanText((string) $text[0], $fileMeta);
 
             try {
                 $text = $this->runPandoc($text);
@@ -152,120 +129,99 @@ class Convert
                 $this->counter++;
             } catch (PandocException $e) {
                 if (!$this->skiperrors) {
-                    throw new \Exception($e);
-                } else {
-                    $this->message("Failed converting " . $fileMeta['title'] . ": " . $e->getMessage());
+                    throw new \RuntimeException($e->getMessage(), 0, $e);
                 }
+
+                $this->message("Failed converting {$fileMeta['title']}: {$e->getMessage()}");
             }
         }
     }
 
     /**
-     * Handles the various tasks to clean and get text ready to convert
-     * 
-     * @param  string $text Text to convert
-     * @param  array $fileMeta File information
-     * @return string Cleaned text
+     * Decode entities and rewrite wiki links before handing text to Pandoc.
+     *
+     * @param array<string, string> $fileMeta
      */
-    public function cleanText($text, $fileMeta)
+    public function cleanText(string $text, array $fileMeta): string
     {
-        $callback = new cleanLink($this->flatten, $fileMeta);
-        $callbackFix = new pandocFix();
+        $callback = new CleanLink($this->flatten, $fileMeta);
 
-        // decode inline html
+        // Decode inline HTML entities so Pandoc sees the real characters.
         $text = html_entity_decode($text);
 
-        // Hack to fix URLs for older version of pandoc
-        if ($this->pandocBroken) {
-            $text = preg_replace_callback('/\[(http.+?)\]/', [$callbackFix, 'urlFix'], $text);
-        }
-
-        // clean up links
-        return preg_replace_callback('/\[\[(.+?)\]\]/', [$callback, "cleanLink"], $text);
+        // Rewrite [[wiki links]] into clean, normalized links.
+        return preg_replace_callback('/\[\[(.+?)\]\]/', $callback->cleanLink(...), $text);
     }
 
     /**
-     * Run pandoc and do the actual conversion
-     * @param  string $text Text to convert
-     * @return string Converted Text
+     * Run Pandoc and unescape underscores it would otherwise backslash-escape.
      */
-    public function runPandoc($text)
+    public function runPandoc(string $text): string
     {
         $text = $this->pandoc->runWith($text, $this->pandocOptions);
-        $text = str_replace('\_', '_', $text);
 
-        return $text;
+        return str_replace('\_', '_', $text);
     }
 
     /**
-     * Save new mark down file
-     * 
-     * @param  string $fileMeta Name of file to save
-     * @param  string $text     Body of file to save
-     * @return void
+     * Write the converted markdown to disk.
+     *
+     * @param array<string, string> $fileMeta
      */
-    public function saveFile($fileMeta, $text)
+    public function saveFile(array $fileMeta, string $text): void
     {
         $this->createDirectory($fileMeta['directory']);
 
         $fileName = $this->pageDeDuplicator($fileMeta['filename']);
 
-        $file = fopen($fileMeta['directory'] . $fileName . '.md', 'w');
-        fwrite($file, $text);
-        fclose($file);
+        file_put_contents($fileMeta['directory'] . $fileName . '.md', $text);
 
-        $this->message("Converted: " . $fileMeta['directory'] . $fileName);
+        $this->message("Converted: {$fileMeta['directory']}{$fileName}");
     }
 
     /**
-     * Page De-duplicator
-     *
-     * @param string $filename
-     * @return string De-duplicated filename
+     * Append a counter suffix when a filename (case-insensitively) has already been written.
      */
-    public function pageDeDuplicator($filename)
+    public function pageDeDuplicator(string $filename): string
     {
         $lcFileName = strtolower($filename);
         $count = substr_count($this->pageList, " {$lcFileName} ");
 
         $this->pushPage($lcFileName);
 
-        return ($count) ? $filename . "({$count})" : $filename;
+        return $count ? "{$filename}({$count})" : $filename;
     }
 
     /**
-     * Push page onto de-duplicator string
-     *
-     * @param string $file
-     * @return void
+     * Record a filename on the de-duplication list.
      */
-    public function pushPage($file)
+    public function pushPage(string $file): void
     {
         $this->pageList .= ' ' . strtolower($file) . ' ';
     }
 
     /**
-     * Build array of file information
-     * 
-     * @param  array $title Title of current page to convert
-     * @return array File information: Directory, filename, title and url
+     * Build directory, filename, title and url for a page from its title node.
+     *
+     * @param array<int, SimpleXMLElement> $title
+     * @return array<string, string>
      */
-    public function retrieveFileInfo($title)
+    public function retrieveFileInfo(array $title): array
     {
-        $title = (string)$title[0];
+        $title = (string) $title[0];
         $url = str_replace(' ', '_', $title);
         $filename = $url;
         $directory = '';
 
-        if ($slash = strpos($url, '/')) {
+        if (strpos($url, '/')) {
             $title = str_replace('/', ' ', $title);
             $url_parts = pathinfo($url);
             $directory = $url_parts['dirname'];
-            $filename = $url_parts['basename']; // Avoids breaking names with periods on them
+            $filename = $url_parts['basename']; // Avoids breaking names with periods in them.
             $this->directory_list[] = $directory;
-            if ($this->flatten && $directory != '') {
+            if ($this->flatten && $directory !== '') {
                 $filename = str_replace('/', '_', $directory) . '_' . $filename;
-                $directory  = '';
+                $directory = '';
             } else {
                 $directory = rtrim($directory, '/') . '/';
             }
@@ -276,90 +232,91 @@ class Convert
             'directory' => $directory,
             'filename' => $filename,
             'title' => $title,
-            'url' => $url
+            'url' => $url,
         ];
     }
 
     /**
-     * Simple method to handle outputting messages to the CLI
-     * 
-     * @param  string $message Message to output
-     * @return void
+     * Output a message to the CLI.
      */
-    public function message($message)
+    public function message(string $message): void
     {
         echo $message . PHP_EOL;
     }
 
     /**
-     * Rename files that have the same name as a folder to index.md
-     * 
-     * @return void
+     * Rename files that share the name of a folder to index.md (only when --indexes is set).
      */
-    public function renameFiles()
+    public function renameFiles(): void
     {
-        if ($this->flatten || !count((array)$this->directory_list) || !$this->indexes) {
+        if ($this->flatten || $this->directory_list === [] || !$this->indexes) {
             return;
         }
 
         foreach ($this->directory_list as $directory_name) {
             if (file_exists($this->output . $directory_name . '.md')) {
-                rename($this->output . $directory_name . '.md', $this->output . $directory_name . '/index.md');
+                rename(
+                    $this->output . $directory_name . '.md',
+                    $this->output . $directory_name . '/index.md'
+                );
             }
         }
     }
 
     /**
-     * Build and return Permalink metadata
-     * 
-     * @param array $fileMeta File Title and URL
-     * @return string Page body with meta data added
+     * Build the permalink front-matter block, or an empty string when --addmeta is unset.
+     *
+     * @param array<string, string> $fileMeta
      */
-    public function getMetaData($fileMeta)
+    public function getMetaData(array $fileMeta): string
     {
-        return ($this->addmeta)
+        return $this->addmeta
             ? sprintf("---\ntitle: %s\npermalink: /%s/\n---\n\n", $fileMeta['title'], $fileMeta['url'])
             : '';
     }
 
     /**
-     * Load file
-     *
-     * @return string Contents of XML file to convert
+     * Read the XML export, normalizing xmlns= to ns= so SimpleXML xpath works.
      */
-    public function loadFile()
+    public function loadFile(): string
     {
-        if (!file_exists($this->filename)) {
-            throw new \Exception('Input file does not exist: ' . $this->filename);
+        if ($this->filename === null || !file_exists($this->filename)) {
+            throw new \RuntimeException('Input file does not exist: ' . ($this->filename ?? ''));
         }
 
         $file = file_get_contents($this->filename);
 
-        return str_replace('xmlns=', 'ns=', $file); //$string is a string that contains xml...
+        return str_replace('xmlns=', 'ns=', $file);
     }
 
     /**
-     * Load XML contents into variable
+     * Parse the XML and extract the page nodes to convert.
      */
-    public function loadData($xmlData)
+    public function loadData(string $xmlData): void
     {
-        if (($xml = new \SimpleXMLElement($xmlData,  LIBXML_PARSEHUGE)) === false) {
-            throw new \Exception('Invalid XML File.');
+        $previous = libxml_use_internal_errors(true);
+
+        try {
+            $xml = new SimpleXMLElement($xmlData, LIBXML_PARSEHUGE);
+        } catch (\Exception $e) {
+            throw new \RuntimeException('Invalid XML File.', 0, $e);
+        } finally {
+            libxml_use_internal_errors($previous);
         }
+
         $this->dataToConvert = $xml->xpath('page');
 
-        if ($this->dataToConvert == '') {
-            throw new \Exception('XML Data is empty');
+        if ($this->dataToConvert === []) {
+            throw new \RuntimeException('XML Data is empty');
         }
     }
 
     /**
-     * Get command line arguments into variables
-     * 
-     * @param  array $argv Array hold command line interface arguments
-     * @return void
+     * Map parsed CLI options onto the converter's properties.
+     *
+     * @param array<string, mixed> $options
      */
-    public function setArguments($options)
+    public function setArguments(array $options): void
     {
         $this->setOption('filename', $options, null);
         $this->setOption('output', $options, 'output');
@@ -372,113 +329,101 @@ class Convert
     }
 
     /**
-     * Set one Option
-     * 
-     * @param string $name  Option name
-     * @param string $value Option value
-     * @return void
+     * Set one option, treating a present-but-empty value (a bare flag) as true.
+     *
+     * @param array<string, mixed> $options
      */
-    public function setOption($name, $options, $default = false)
+    public function setOption(string $name, array $options, mixed $default = false): void
     {
-        $this->{$name} = (isset($options[$name]) ? (empty($options[$name]) ? true : $options[$name]) : $default);
-    }
+        if (!isset($options[$name])) {
+            $this->{$name} = $default;
 
-    /**
-     * Helper method to cleanly create a directory if none already exists
-     * 
-     * @param string $output Returns path
-     * @return string Directory
-     */
-    public function createDirectory($directory = null)
-    {
-        if (!empty($directory) && !file_exists($directory)) {
-            if (!mkdir($directory, 0755, true)) {
-                throw new \Exception('Unable to create directory: ' . $directory);
-            }
+            return;
         }
-        return $directory;
+
+        $this->{$name} = empty($options[$name]) ? true : $options[$name];
     }
 
     /**
-     * Get Option
-     * 
-     * @param string $name  Option name
-     * @param string $value Option value
-     * @return string Option value
+     * Get a single option/property value.
      */
-    public function getOption($name)
+    public function getOption(string $name): mixed
     {
         return $this->{$name};
     }
 
-    /**
-     * Get Version
-     */
-    public function getVersion()
+    public function getVersion(): void
     {
         $this->message("Version: {$this->version}");
     }
 
     /**
-     * Basic help instructions
+     * Create a directory (recursively) when it does not already exist.
      */
-    public function help()
+    public function createDirectory(?string $directory = null): ?string
+    {
+        if (!empty($directory) && !file_exists($directory)) {
+            if (!mkdir($directory, 0755, true) && !is_dir($directory)) {
+                throw new \RuntimeException('Unable to create directory: ' . $directory);
+            }
+        }
+
+        return $directory;
+    }
+
+    public function help(): void
     {
         $helpMessage = <<<HELPMESSAGE
-Version: {$this->version}
-MIT License: https://opensource.org/licenses/MIT
+        Version: {$this->version}
+        MIT License: https://opensource.org/licenses/MIT
 
-Mediawiki to GFM converter is a script that will convert a set of media wiki
-files to GitHub Flavoured Markdown (GFM). This converter has been tested to work
-with Mediawiki 1.27.x and 1.29.x.
+        Mediawiki to GFM converter is a script that will convert a set of media wiki
+        files to GitHub Flavoured Markdown (GFM).
 
-Requirements:
-    pandoc: Installation instructions are here https://pandoc.org/installing.html
-            Tested on version 2.0.1.1 and 2.0.2 
-    mediawiki: https://www.mediawiki.org/wiki/MediaWiki
-               Tested on version 1.27.x and 1.29.x
+        Requirements:
+            pandoc: Installation instructions are here https://pandoc.org/installing.html
+                    Tested on version 3.9 and up.
+            mediawiki: https://www.mediawiki.org/wiki/MediaWiki
 
-Run the script on your exported MediaWiki XML file:
-    ./convert.php --filename=/path/to/filename.xml 
+        Run the script on your exported MediaWiki XML file:
+            ./convert.php --filename=/path/to/filename.xml
 
-Options:
-    ./convert.php --filename=/path/to/filename.xml --output=/path/to/converted/files --format=gfm --addmeta --flatten --indexes
+        Options:
+            ./convert.php --filename=/path/to/filename.xml --output=/path/to/converted/files --format=gfm --addmeta --flatten --indexes
 
-    --filename   : Location of the mediawiki exported XML file to convert to GFM format (Required).
-    --output     : Location where you would like to save the converted files (Default: ./output).
-    --format     : What format would you like to convert to. Default is GFM (for use 
-                   in GitLab and GitHub) See pandoc documentation for more formats (Default: 'gfm').
-    --addmeta    : This flag will add a Permalink to each file (Default: false).
-    --flatten    : This flag will force all pages to be saved in a single level 
-                   directory. File names will be converted in the following way:
-                   Mediawiki_folder/My_File_Name -> Mediawiki_folder_My_File_Name
-                   and saved in a file called 'Mediawiki_folder_My_File_Name.md'.
-    --skiperrors : Do not stop on pandoc parsing errors, instead, skip the file (Default: false).
-    --version    : Displays the program's version.
-    --help       : This help message.
+            --filename   : Location of the mediawiki exported XML file to convert to GFM format (Required).
+            --output     : Location where you would like to save the converted files (Default: ./output).
+            --format     : What format would you like to convert to. Default is GFM (for use
+                           in GitLab and GitHub) See pandoc documentation for more formats (Default: 'gfm').
+            --addmeta    : This flag will add a Permalink to each file (Default: false).
+            --flatten    : This flag will force all pages to be saved in a single level
+                           directory. File names will be converted in the following way:
+                           Mediawiki_folder/My_File_Name -> Mediawiki_folder_My_File_Name
+                           and saved in a file called 'Mediawiki_folder_My_File_Name.md'.
+            --indexes    : Rename a file matching its directory name to index.md.
+            --skiperrors : Do not stop on pandoc parsing errors, instead, skip the file (Default: false).
+            --version    : Displays the program's version.
+            --help       : This help message.
 
+        Export Mediawiki Files to XML
+        In order to convert from MediaWiki format to GFM and use in GitLab (or GitHub), you will
+        first need to export all the pages you wish to convert from Mediawiki into an XML file:
 
-Export Mediawiki Files to XML
-In order to convert from MediaWiki format to GFM and use in GitLab (or GitHub), you will 
-first need to export all the pages you wish to convert from Mediawiki into an XML file. 
-Here are a few simple steps to help
-you accomplish this quickly:
+            1. MediaWiki -> Special Pages -> 'All Pages'
+            2. With help from the filter tool at the top of 'All Pages', copy the page names
+               to convert into a text file (one file name per line).
+            3. MediaWiki -> Special Pages -> 'Export'
+            4. Paste the list of pages into the Export field.
+               Note: This convert script will only do latest version, not revisions.
+            5. Check: 'Include only the current revision, not the full history'
+            6. Uncheck: Include Templates
+            7. Check: Save as file
+            8. Click on the 'Export' button.
 
-    1. MediaWiki -> Special Pages -> 'All Pages'
-    2. With help from the filter tool at the top of 'All Pages', copy the page names
-       to convert into a text file (one file name per line).
-    3. MediaWiki -> Special Pages -> 'Export'
-    4. Paste the list of pages into the Export field. 
-       Note: This convert script will only do latest version, not revisions. 
-    5. Check: 'Include only the current revision, not the full history' 
-    6. Uncheck: Include Templates
-    7. Check: Save as file
-    8. Click on the 'Export' button.
+        In theory you can convert to any of the formats listed at:
+            https://pandoc.org/MANUAL.html#description
 
-In theory you can convert to any of these formats… but this haven't been tested:
-    https://pandoc.org/MANUAL.html#description
-
-HELPMESSAGE;
+        HELPMESSAGE;
 
         $this->message($helpMessage);
     }

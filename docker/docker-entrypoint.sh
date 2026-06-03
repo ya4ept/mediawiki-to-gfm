@@ -1,24 +1,24 @@
 #!/bin/sh
+set -e
 
-isCommand() {
-  # Retain backwards compatibility with common CI providers,
-  # see: https://github.com/composer/docker/issues/107
-  if [ "$1" = "sh" ]; then
-    return 1
-  fi
+# Entrypoint for the mediawiki-to-gfm image.
+#
+# Usage:
+#   docker run -v "$PWD:/app" mediawiki-to-gfm --filename=export.xml
+#
+# The user's current directory is mounted at /app. Converted files are always
+# written to /app/output, so callers do not pass --output themselves (and the
+# container cannot see anything outside the mounted directory anyway).
 
-  convert.php --help
-}
+# Help and version are informational; run them without forcing an output dir.
+case "$1" in
+    --help|-h|"")
+        exec convert.php --help
+        ;;
+    --version|-v)
+        exec convert.php --version
+        ;;
+esac
+
 mkdir -p /app/output
-# check if the first argument passed in looks like a flag
-if [ "${1#-}" != "$1" ]; then
-  set -- /sbin/tini -- convert.php "$@" --output=/app/output
-# check if the first argument passed in is composer
-elif [ "$1" = 'convert.php' ]; then
-  set -- /sbin/tini -- "$@" --output=/app/output
-# check if the first argument passed in matches a known command
-elif isCommand "$1"; then
-  set -- /sbin/tini -- convert.php "$@" --output=/app/output
-fi
-
-exec "$@"
+exec convert.php "$@" --output=/app/output
