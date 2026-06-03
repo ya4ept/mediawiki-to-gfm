@@ -1,7 +1,6 @@
 {
     "require": {
-        "php": "^8.4",
-        "ryakad/pandoc-php": "dev-master"
+        "php": "^8.4"
     },
     "autoload": {
         "psr-4": {

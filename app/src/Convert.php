@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace App;
 
-use Pandoc\Pandoc;
-use Pandoc\PandocException;
 use SimpleXMLElement;
 
 class Convert
@@ -13,7 +11,7 @@ class Convert
     /**
      * Converter version.
      */
-    private string $version = '1.0.0';
+    private string $version = '1.0.1';
 
     /**
      * Path and name of the file to convert.

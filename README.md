@@ -96,7 +96,7 @@ logged-in registry session:
 docker login
 ./docker/release.sh
 ```
-This pushes `oooc/mediawiki-to-gfm:latest` and `:1.0.0`. Override the
+This pushes `oooc/mediawiki-to-gfm:latest` and `:1.0.1`. Override the
 defaults with environment variables:
 ```bash
 VERSION=1.1.0 DOCKER_USERNAME=yourname ./docker/release.sh

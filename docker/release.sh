@@ -12,14 +12,14 @@ set -euo pipefail
 # and a logged-in registry session (docker login).
 #
 # Usage:
-#   docker/release.sh                 # pushes :latest and :1.0.0 as oooc/...
+#   docker/release.sh                 # pushes :latest and :1.0.1 as oooc/...
 #   VERSION=1.1.0 docker/release.sh   # override the version tag
 #   DOCKER_USERNAME=me docker/release.sh
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
 DOCKER_USERNAME="${DOCKER_USERNAME:-oooc}"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.1}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 IMAGE="${DOCKER_USERNAME}/mediawiki-to-gfm"
 

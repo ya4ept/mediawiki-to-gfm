@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Convert;
-use Pandoc\Pandoc;
-use Pandoc\PandocException;
+use App\Pandoc;
+use App\PandocException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
@@ -529,16 +529,14 @@ final class ConvertTest extends TestCase
  * Hand-written Pandoc test double.
  *
  * It deliberately does NOT call the real Pandoc constructor (which requires a
- * pandoc binary and a writable tmp dir) and overrides __destruct() to do nothing.
- * The real Pandoc::__destruct() runs glob($tmpFile . '*') and unlinks the results;
- * with an unset $tmpFile that becomes glob('*') against the current working
- * directory, deleting real project files. This fake never touches the filesystem.
+ * pandoc binary and a writable temp dir) and overrides __destruct() to do nothing,
+ * so the fake never invokes the binary or touches the filesystem.
  */
 final class FakePandoc extends Pandoc
 {
     public ?string $lastContent = null;
 
-    /** @var array<string, string>|null */
+    /** @var array<string, string|null>|null */
     public ?array $lastOptions = null;
 
     public function __construct(
@@ -549,9 +547,9 @@ final class FakePandoc extends Pandoc
     }
 
     /**
-     * @param array<string, string> $options
+     * @param array<string, string|null> $options
      */
-    public function runWith($content, $options): string
+    public function runWith(string $content, array $options): string
     {
         $this->lastContent = $content;
         $this->lastOptions = $options;
