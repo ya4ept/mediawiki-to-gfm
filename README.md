@@ -5,9 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Mediawiki to GitHub Flavoured Markdown
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]
-(https://opensource.org/licenses/MIT)[![CI]
-(https://github.com/outofcontrol/mediawiki-to-gfm/actions/workflows/ci.yml/badge.svg)](https://github.com/outofcontrol/mediawiki-to-gfm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)[![CI](https://github.com/outofcontrol/mediawiki-to-gfm/actions/workflows/ci.yml/badge.svg)](https://github.com/outofcontrol/mediawiki-to-gfm/actions/workflows/ci.yml)
 
 Mediawiki to GFM is a script to convert a set of [Mediawiki]
 (https://www.mediawiki.org) pages to [GitHub Flavoured Markdown]
